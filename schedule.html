@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- 共有の URL（#以降の合言葉）を知っている人だけが見るページ。検索に載せない -->
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>共有されたスケジュール</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .status { margin: 24px 0; padding: 14px 16px; border: 1px solid var(--rule); border-radius: 10px; }
+    .status button {
+      margin-top: 8px; font: inherit; color: var(--accent); background: none;
+      border: 1px solid var(--rule); border-radius: 8px; padding: 6px 14px; cursor: pointer;
+      min-height: 44px;
+    }
+    .week { margin-top: 28px; }
+    .week h2 { margin-top: 0; }
+    .day { display: grid; grid-template-columns: 5.5em 1fr; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--rule); }
+    .day:first-of-type { border-top: none; }
+    .date { font-weight: 600; white-space: nowrap; }
+    .date.today::after { content: "今日"; margin-left: 6px; font-size: 0.75rem; font-weight: 600; color: var(--accent); }
+    .date.sun { color: #c62828; }
+    .date.sat { color: #1565c0; }
+    @media (prefers-color-scheme: dark) {
+      .date.sun { color: #ff8a80; }
+      .date.sat { color: #82b1ff; }
+    }
+    .items { list-style: none; margin: 0; padding: 0; min-width: 0; }
+    .items li { display: flex; flex-wrap: wrap; column-gap: 10px; align-items: baseline; padding: 2px 0; }
+    .time { color: var(--muted); font-size: 0.9rem; white-space: nowrap; min-width: 7em; font-variant-numeric: tabular-nums; }
+    .title { flex: 1 1 10em; min-width: 0; overflow-wrap: anywhere; }
+    /* 幅の狭い画面では日付を上に置き、時刻と件名に幅を回す（件名が1文字ずつ折り返さないように） */
+    @media (max-width: 480px) {
+      .day { grid-template-columns: 1fr; gap: 2px; }
+    }
+    .empty { color: var(--muted); font-size: 0.9rem; }
+    .pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 28px; }
+    .pager button {
+      font: inherit; color: var(--accent); background: none; border: 1px solid var(--rule);
+      border-radius: 8px; padding: 8px 14px; cursor: pointer; min-height: 44px;
+    }
+    .pager button:disabled { color: var(--muted); cursor: default; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>共有されたスケジュール</h1>
+    <p class="muted">
+      業務管理（GyomuKanri）で共有された予定です。予定の<strong>件名と時間だけ</strong>を表示しています（日本時間）。
+      <span id="updated"></span>
+    </p>
+
+    <div id="status" class="status" role="status" aria-live="polite">読み込んでいます…</div>
+    <div id="weeks"></div>
+    <div class="pager" id="pager" hidden>
+      <button type="button" id="prev">← 前の4週</button>
+      <button type="button" id="next">次の4週 →</button>
+    </div>
+
+    <nav>
+      <a href="index.html">業務管理について</a>
+      <a href="privacy.html">プライバシーポリシー</a>
+    </nav>
+  </main>
+
+  <!-- 繰り返し（RRULE・EXDATE）の展開はカレンダーの決まりどおりに ical.js に任せる。
+       ここで自前に展開すると、アプリ・カレンダーアプリと食い違う -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ical.js/1.5.0/ical.min.js"
+          integrity="sha384-6SU9o/kopjziIukGhxSpfo75dojAj0O1JWZ+Z/2FdC6rLs6pJvDmRntnUdMS7ht2"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+  (() => {
+    "use strict";
+
+    // 予定は Supabase の Edge Function（schedule-feed）が iCalendar で出す。このページはそれを読んで並べるだけ。
+    // ▲ 合言葉は URL の # 以降に置く。# 以降はブラウザから GitHub のサーバーへ送られないので、
+    //   このページの置き場所には合言葉が残らない（送られるのは予定を出す関数だけ）
+    const FEED_BASE = "https://fikjpmotklstfvdvrrxp.supabase.co/functions/v1/schedule-feed/";
+    const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+    const ZONE = "Asia/Tokyo";
+    const DAYS_PER_PAGE = 28;
+    const MAX_PAGES = 13; // 1年先まで
+
+    const statusEl = document.getElementById("status");
+    const weeksEl = document.getElementById("weeks");
+    const pagerEl = document.getElementById("pager");
+    const prevEl = document.getElementById("prev");
+    const nextEl = document.getElementById("next");
+    const updatedEl = document.getElementById("updated");
+
+    let occurrencesCache = null; // { component, events }
+    let page = 0;
+
+    function showStatus(message, retry) {
+      statusEl.hidden = false;
+      statusEl.textContent = message;
+      if (retry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "もう一度読み込む";
+        button.addEventListener("click", load);
+        statusEl.appendChild(document.createElement("br"));
+        statusEl.appendChild(button);
+      }
+    }
+
+    // 日本時間の年月日（"2026-10-05"）。並べる・比べるのはこの文字列で行う（端末の時刻に左右されない）
+    const dayFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: ZONE, year: "numeric", month: "2-digit", day: "2-digit" });
+    const timeFormatter = new Intl.DateTimeFormat("ja-JP", { timeZone: ZONE, hour: "2-digit", minute: "2-digit", hour12: false });
+    const labelFormatter = new Intl.DateTimeFormat("ja-JP", { timeZone: "UTC", month: "numeric", day: "numeric", weekday: "short" });
+    const weekdayFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" });
+
+    function dayKeyOfInstant(date) { return dayFormatter.format(date); }
+    // 年月日の文字列 ↔ その日の UTC 0:00（日付だけの値。曜日と前後の計算にだけ使う）
+    function keyToDate(key) { const [y, m, d] = key.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)); }
+    function dateToKey(date) { return date.toISOString().slice(0, 10); }
+    function addDays(key, n) { const d = keyToDate(key); d.setUTCDate(d.getUTCDate() + n); return dateToKey(d); }
+    function icalDateKey(time) {
+      return `${time.year}-${String(time.month).padStart(2, "0")}-${String(time.day).padStart(2, "0")}`;
+    }
+
+    function parseCalendar(text) {
+      const component = new ICAL.Component(ICAL.parse(text));
+      // TZID=Asia/Tokyo の時刻を読めるように、ファイルの中の VTIMEZONE を登録する
+      for (const vtimezone of component.getAllSubcomponents("vtimezone")) {
+        const zone = new ICAL.Timezone(vtimezone);
+        if (!ICAL.TimezoneService.has(zone.tzid)) ICAL.TimezoneService.register(zone.tzid, zone);
+      }
+      const events = component.getAllSubcomponents("vevent").map((v) => new ICAL.Event(v));
+      return { component, events };
+    }
+
+    // 期間 [fromKey, toKey) に掛かる回を集める。終日は「日付だけ」、時刻つきは「瞬間」で持つ
+    function occurrencesBetween(events, fromKey, toKey) {
+      const result = [];
+      const rangeEnd = keyToDate(toKey);
+      for (const event of events) {
+        const push = (startTime, endTime) => {
+          if (startTime.isDate) {
+            const startKey = icalDateKey(startTime);
+            // DTEND は含まない日（翌日）。無ければ1日の予定
+            const endKey = endTime ? addDays(icalDateKey(endTime), -1) : startKey;
+            if (endKey < fromKey || startKey >= toKey) return;
+            result.push({ allDay: true, startKey, endKey, title: event.summary || "予定" });
+          } else {
+            const start = startTime.toJSDate();
+            const end = endTime ? endTime.toJSDate() : start;
+            const startKey = dayKeyOfInstant(start);
+            // ちょうど0時に終わる予定は前の日で終わる
+            const endKey = dayKeyOfInstant(new Date(Math.max(start.getTime(), end.getTime() - 1)));
+            if (endKey < fromKey || startKey >= toKey) return;
+            result.push({ allDay: false, start, end, startKey, endKey, title: event.summary || "予定" });
+          }
+        };
+
+        if (event.isRecurring()) {
+          const iterator = event.iterator();
+          let next;
+          // 何年も前から続く毎日の予定でも先まで届くよう、上限は大きめ（無限に回らないための歯止め）
+          let guard = 0;
+          while ((next = iterator.next()) && guard++ < 50000) {
+            if (next.toJSDate() >= rangeEnd && !next.isDate) break;
+            if (next.isDate && icalDateKey(next) >= toKey) break;
+            const details = event.getOccurrenceDetails(next);
+            push(details.startDate, details.endDate);
+          }
+        } else {
+          push(event.startDate, event.endDate);
+        }
+      }
+      return result;
+    }
+
+    function timeText(item, dayKey) {
+      if (item.allDay) {
+        return item.startKey === item.endKey ? "終日" : `終日（〜${labelOf(item.endKey)}）`;
+      }
+      const startsToday = item.startKey === dayKey;
+      const endsToday = item.endKey === dayKey;
+      if (startsToday && endsToday) return `${timeFormatter.format(item.start)}〜${timeFormatter.format(item.end)}`;
+      if (startsToday) return `${timeFormatter.format(item.start)}〜`;
+      if (endsToday) return `〜${timeFormatter.format(item.end)}`;
+      return "終日";
+    }
+
+    function labelOf(key) { return labelFormatter.format(keyToDate(key)); }
+
+    function sortKey(item, dayKey) {
+      if (item.allDay || item.startKey !== dayKey) return "0";
+      return "1" + item.start.toISOString();
+    }
+
+    function render() {
+      const todayKey = dayKeyOfInstant(new Date());
+      const fromKey = addDays(todayKey, page * DAYS_PER_PAGE);
+      const toKey = addDays(fromKey, DAYS_PER_PAGE);
+      const items = occurrencesBetween(occurrencesCache.events, fromKey, toKey);
+
+      weeksEl.textContent = "";
+      for (let week = 0; week < DAYS_PER_PAGE / 7; week++) {
+        const weekStart = addDays(fromKey, week * 7);
+        const section = document.createElement("section");
+        section.className = "week";
+        const heading = document.createElement("h2");
+        heading.textContent = `${labelOf(weekStart)} 〜 ${labelOf(addDays(weekStart, 6))}`;
+        section.appendChild(heading);
+
+        for (let i = 0; i < 7; i++) {
+          const dayKey = addDays(weekStart, i);
+          const row = document.createElement("div");
+          row.className = "day";
+          const date = document.createElement("div");
+          const weekday = weekdayFormatter.format(keyToDate(dayKey));
+          date.className = "date" + (dayKey === todayKey ? " today" : "")
+            + (weekday === "Sun" ? " sun" : weekday === "Sat" ? " sat" : "");
+          date.textContent = labelOf(dayKey);
+          row.appendChild(date);
+
+          const todays = items
+            .filter((item) => item.startKey <= dayKey && item.endKey >= dayKey)
+            .sort((a, b) => sortKey(a, dayKey).localeCompare(sortKey(b, dayKey)));
+          if (todays.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "empty";
+            empty.textContent = "予定なし";
+            row.appendChild(empty);
+          } else {
+            const list = document.createElement("ul");
+            list.className = "items";
+            for (const item of todays) {
+              const li = document.createElement("li");
+              const time = document.createElement("span");
+              time.className = "time";
+              time.textContent = timeText(item, dayKey);
+              const title = document.createElement("span");
+              title.className = "title";
+              title.textContent = item.title; // textContent なので件名に何が入っていても HTML にならない
+              li.append(time, title);
+              list.appendChild(li);
+            }
+            row.appendChild(list);
+          }
+          section.appendChild(row);
+        }
+        weeksEl.appendChild(section);
+      }
+      pagerEl.hidden = false;
+      prevEl.disabled = page === 0;
+      nextEl.disabled = page >= MAX_PAGES - 1;
+    }
+
+    async function load() {
+      const token = decodeURIComponent(location.hash.replace(/^#/, ""));
+      // 手元で確かめるときだけ、別の場所の .ics を読めるようにする（公開の場所では効かない）
+      const devSource = ["localhost", "127.0.0.1"].includes(location.hostname)
+        ? new URLSearchParams(location.search).get("src") : null;
+      if (!devSource && !TOKEN_PATTERN.test(token)) {
+        showStatus("この URL では予定を表示できません。共有した人から届いた URL を、そのまま開いてください。");
+        return;
+      }
+      if (typeof ICAL === "undefined") {
+        showStatus("表示に使う部品を読み込めませんでした。通信を確かめてください。", true);
+        return;
+      }
+      showStatus("読み込んでいます…");
+      try {
+        const response = await fetch(devSource || `${FEED_BASE}${token}.ics`, { cache: "no-store" });
+        if (response.status === 404) {
+          showStatus("この共有は止められたか、URL が間違っています。共有した人に確かめてください。");
+          return;
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        occurrencesCache = parseCalendar(await response.text());
+        statusEl.hidden = true;
+        updatedEl.textContent = `（${timeFormatter.format(new Date())} に読み込み）`;
+        render();
+      } catch (error) {
+        showStatus("予定を読み込めませんでした。時間をおいてもう一度試してください。", true);
+      }
+    }
+
+    prevEl.addEventListener("click", () => { if (page > 0) { page--; render(); window.scrollTo(0, 0); } });
+    nextEl.addEventListener("click", () => { if (page < MAX_PAGES - 1) { page++; render(); window.scrollTo(0, 0); } });
+    window.addEventListener("hashchange", () => { page = 0; load(); });
+    load();
+  })();
+  </script>
+</body>
+</html>
