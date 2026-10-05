@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- URL（#以降の合言葉）を受け取った人だけが使うページ。検索に載せない -->
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <!-- ▲ 読み書きする先は Web チャットの関数だけ（手元で確かめるときだけ localhost）。
+       中身は textContent で入れているが、万一の差し込みでもよその宛先へ送れないように絞る -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src https://fikjpmotklstfvdvrrxp.supabase.co http://localhost:* http://127.0.0.1:*; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <title>チャット</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    :root {
+      --chat-bg: #eef1f5;
+      --bubble-owner: #ffffff;
+      --bubble-guest: #c9efb4;
+      --bubble-text: #1c1c1e;
+      --pill: #dfe3e8;
+      --pill-text: #3c4043;
+      --danger: #b3261e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --chat-bg: #17181b;
+        --bubble-owner: #2c2d31;
+        --bubble-guest: #2f5a28;
+        --bubble-text: #f2f2f5;
+        --pill: #2c2d31;
+        --pill-text: #c4c4ca;
+        --danger: #ff8a80;
+      }
+    }
+
+    /* ▲ id で display を決めた要素（#chat など）は、hidden 属性の display: none に勝ってしまう。必ず隠れるようにする */
+    [hidden] { display: none !important; }
+    body { display: flex; flex-direction: column; min-height: 100dvh; }
+    /* チャットのあいだは画面の高さに収め、やり取りの欄だけをスクロールさせる（入力欄を常に下に出す） */
+    body.chat-mode { height: 100dvh; overflow: hidden; }
+
+    header.chat-head {
+      position: sticky; top: 0; z-index: 2;
+      background: var(--bg); border-bottom: 1px solid var(--rule);
+      padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top));
+    }
+    .chat-head h1 { font-size: 1.1rem; margin: 0; line-height: 1.4; overflow-wrap: anywhere; }
+    .chat-head p { margin: 0; }
+
+    .panel { max-width: 520px; width: 100%; margin: 32px auto; padding: 0 16px; }
+    .panel h2 { border-top: none; margin-top: 0; padding-top: 0; }
+    .panel label { display: block; font-weight: 600; margin: 16px 0 6px; }
+    .panel input {
+      width: 100%; font: inherit; font-size: 1.05rem; padding: 10px 12px; min-height: 44px;
+      color: var(--text); background: var(--bg); border: 1px solid var(--rule); border-radius: 10px;
+    }
+    .panel input.code { letter-spacing: 0.4em; font-variant-numeric: tabular-nums; }
+    button.primary, button.secondary {
+      font: inherit; min-height: 44px; padding: 8px 18px; border-radius: 10px; cursor: pointer;
+    }
+    button.primary { color: #fff; background: var(--accent); border: 1px solid var(--accent); font-weight: 600; }
+    button.primary:disabled { opacity: 0.5; cursor: default; }
+    button.secondary { color: var(--accent); background: none; border: 1px solid var(--rule); }
+    .panel .actions { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .error { color: var(--danger); font-size: 0.95rem; margin: 8px 0 0; }
+
+    #chat { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--chat-bg); }
+    #log {
+      flex: 1; overflow-y: auto; padding: 12px 12px 16px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .day-pill {
+      align-self: center; margin: 12px 0 6px; padding: 2px 12px; border-radius: 999px;
+      background: var(--pill); color: var(--pill-text); font-size: 0.8rem;
+    }
+    .row { display: flex; align-items: flex-end; gap: 6px; max-width: 100%; }
+    .row.guest { flex-direction: row-reverse; }
+    .bubble {
+      max-width: min(78%, 34em); padding: 8px 12px; border-radius: 16px;
+      color: var(--bubble-text); background: var(--bubble-owner);
+      white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6;
+    }
+    .row.guest .bubble { background: var(--bubble-guest); }
+    .row.owner .bubble { border-bottom-left-radius: 6px; }
+    .row.guest .bubble { border-bottom-right-radius: 6px; }
+    .meta { font-size: 0.72rem; color: var(--muted); white-space: nowrap; line-height: 1.3; text-align: right; }
+    .row.owner .meta { text-align: left; }
+    .meta .failed { color: var(--danger); }
+    .meta button, footer.chat-foot button {
+      font: inherit; color: var(--accent); background: none; border: none; cursor: pointer;
+      min-height: 36px; padding: 4px 6px; text-decoration: underline;
+    }
+    .empty { align-self: center; margin: auto; color: var(--muted); font-size: 0.9rem; text-align: center; padding: 24px; }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
+
+    #newer {
+      position: absolute; left: 50%; transform: translateX(-50%); bottom: 88px;
+      font: inherit; font-size: 0.85rem; padding: 6px 14px; min-height: 36px; border-radius: 999px;
+      color: #fff; background: var(--accent); border: none; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    #banner { margin: 0; padding: 8px 16px; font-size: 0.9rem; background: var(--pill); color: var(--pill-text); }
+    #banner button { margin-left: 8px; }
+
+    form.composer {
+      display: flex; gap: 8px; align-items: flex-end;
+      padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom));
+      background: var(--bg); border-top: 1px solid var(--rule);
+    }
+    form.composer textarea {
+      flex: 1; min-width: 0; resize: none; font: inherit; line-height: 1.5;
+      min-height: 44px; max-height: 40vh; padding: 9px 12px;
+      color: var(--text); background: var(--bg); border: 1px solid var(--rule); border-radius: 18px;
+    }
+    form.composer button { flex: none; border-radius: 18px; }
+    .counter { font-size: 0.75rem; color: var(--muted); padding: 0 16px 4px; background: var(--bg); text-align: right; }
+    .counter.over { color: var(--danger); }
+
+    footer.chat-foot { padding: 6px 16px 10px; background: var(--bg); font-size: 0.75rem; color: var(--muted); line-height: 1.5; }
+    footer.chat-foot a { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header class="chat-head">
+    <h1 id="title">チャット</h1>
+    <p class="muted" id="subtitle">業務管理（GyomuKanri）のチャット</p>
+  </header>
+
+  <!-- 読み込み中・見つからない・通信できない -->
+  <section id="status" class="panel" role="status" aria-live="polite">
+    <p>読み込んでいます…</p>
+  </section>
+
+  <!-- 合言葉 -->
+  <section id="passcode" class="panel" hidden>
+    <h2>合言葉を入れてください</h2>
+    <p class="muted">このチャットには合言葉が設定されています。URL を送ってくれた相手から受け取った6桁の数字を入れてください。</p>
+    <form id="passcode-form" novalidate>
+      <label for="passcode-input">合言葉（6桁の数字）</label>
+      <input id="passcode-input" class="code" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="6" pattern="[0-9]{6}" required>
+      <p id="passcode-error" class="error" role="alert" hidden></p>
+      <div class="actions"><button type="submit" class="primary" id="passcode-submit">開く</button></div>
+    </form>
+  </section>
+
+  <!-- 名前 -->
+  <section id="name" class="panel" hidden>
+    <h2>お名前を入れてください</h2>
+    <p class="muted" id="name-help">チャットの相手に表示されます。</p>
+    <form id="name-form" novalidate>
+      <label for="name-input">お名前</label>
+      <input id="name-input" autocomplete="name" required>
+      <p id="name-error" class="error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="submit" class="primary" id="name-submit">はじめる</button>
+        <button type="button" class="secondary" id="name-cancel" hidden>やめる</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- チャット -->
+  <section id="chat" hidden>
+    <p id="banner" role="status" hidden></p>
+    <div style="position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0;">
+      <div id="log" role="log" aria-live="polite" aria-relevant="additions text" aria-label="やり取り"></div>
+      <button type="button" id="newer" hidden>新しいメッセージ ↓</button>
+    </div>
+    <div id="counter" class="counter" hidden></div>
+    <form class="composer" id="composer" novalidate>
+      <label for="text" class="sr-only">メッセージ</label>
+      <textarea id="text" rows="1" placeholder="メッセージを入力" enterkeyhint="enter"></textarea>
+      <button type="submit" class="primary" id="send">送信</button>
+    </form>
+    <footer class="chat-foot">
+      <span id="me"></span><button type="button" id="rename" hidden>名前を変える</button>
+      やり取りは業務管理（GyomuKanri）のサーバーに保存され、相手のアプリに表示されます。
+      <a href="privacy.html" target="_blank" rel="noopener">プライバシーポリシー</a>
+    </footer>
+  </section>
+
+  <script>
+  (() => {
+    "use strict";
+
+    // ▲ 合言葉は URL の # 以降に置く。# 以降はブラウザから GitHub のサーバーへ送られないので、
+    //   このページの置き場所には残らない。関数へも**本文**に入れて送る（パスに置くとアクセスログに残る）
+    const API = "https://fikjpmotklstfvdvrrxp.supabase.co/functions/v1/webchat";
+    const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+    const ZONE = "Asia/Tokyo";
+    const POLL_MS = 15000;
+    const MAX_CHARS = 5000;   // サーバー（checkSendText）と同じ。数えるのはコードポイント
+    const MAX_NAME = 50;
+
+    const $ = (id) => document.getElementById(id);
+    const sections = ["status", "passcode", "name", "chat"];
+
+    // 手元で確かめるとき（localhost）だけ、?api= で読み書きする先を差し替えられる
+    let apiURL = API;
+    if (["localhost", "127.0.0.1"].includes(location.hostname)) {
+      const override = new URLSearchParams(location.search).get("api");
+      if (override) apiURL = override;
+    }
+
+    // 壊れた断片（#% など）で例外を投げると「読み込んでいます…」のまま固まるので、読めなければ空にする（＝見つからない）
+    let token = "";
+    try { token = decodeURIComponent(location.hash.slice(1)); } catch { token = ""; }
+    let ticket = null;
+    let title = "";
+    let guestName = null;
+    let messages = [];            // サーバーから来た行（古い順）
+    let pending = [];             // 送っている途中・送れなかった行 { clientMessageId, body, failed }
+    let lastReadByOwnerAt = null;
+    let pollTimer = null;
+    let polling = false;
+    let stopped = false;
+
+    // ---------- 入場券（合言葉を通ったしるし）。保存できないブラウザでも動くように、読み書きは必ず try で包む ----------
+    let ticketKey = null;
+    async function deriveTicketKey() {
+      // 合言葉そのものを保存の鍵にしない（ブラウザの保存領域を覗かれても URL が分からないように、ハッシュの頭だけ使う）
+      try {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+        const hex = [...new Uint8Array(digest)].slice(0, 12).map((b) => b.toString(16).padStart(2, "0")).join("");
+        ticketKey = "gyomu-webchat:" + hex;
+      } catch { ticketKey = null; }
+    }
+    function loadTicket() {
+      if (!ticketKey) return null;
+      try {
+        const raw = localStorage.getItem(ticketKey);
+        if (!raw) return null;
+        const saved = JSON.parse(raw);
+        if (!saved || typeof saved.ticket !== "string") return null;
+        if (saved.expiresAt && Date.parse(saved.expiresAt) <= Date.now()) { clearTicket(); return null; }
+        return saved.ticket;
+      } catch { return null; }
+    }
+    function saveTicket(value, expiresAt) {
+      ticket = value;
+      if (!ticketKey) return;
+      try { localStorage.setItem(ticketKey, JSON.stringify({ ticket: value, expiresAt })); } catch { /* 保存できなくてもこの画面では使える */ }
+    }
+    function clearTicket() {
+      ticket = null;
+      if (!ticketKey) return;
+      try { localStorage.removeItem(ticketKey); } catch { /* 何もしない */ }
+    }
+
+    // ---------- 通信 ----------
+    class ApiError extends Error {
+      constructor(status, body) {
+        super((body && body.error) || "通信に失敗しました。");
+        this.status = status;
+        this.body = body || {};
+      }
+    }
+    async function call(action, payload = {}) {
+      let response;
+      try {
+        response = await fetch(apiURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, token, ...(ticket ? { ticket } : {}), ...payload }),
+          cache: "no-store",
+          credentials: "omit",
+          referrerPolicy: "no-referrer",
+        });
+      } catch {
+        throw new ApiError(0, { error: "つながりません。電波の状態を確かめて、もう一度お試しください。" });
+      }
+      let body = null;
+      try { body = await response.json(); } catch { body = null; }
+      if (!response.ok) throw new ApiError(response.status, body);
+      return body || {};
+    }
+
+    // どの操作でも同じ扱いにする失敗（見つからない・合言葉が要る・名前が要る）。扱えたら true
+    function handleCommonError(error) {
+      if (error.status === 404) { showNotFound(error.message); return true; }
+      if (error.status === 401 && error.body.needsPasscode) { clearTicket(); showPasscode(); return true; }
+      if (error.status === 409 && error.body.needsName) { showName(); return true; }
+      return false;
+    }
+
+    // ---------- 画面の切り替え ----------
+    function show(id) {
+      for (const s of sections) $(s).hidden = s !== id;
+      document.body.classList.toggle("chat-mode", id === "chat");
+    }
+    function setTitle(text) {
+      title = text || "";
+      const heading = title ? `${title} とのチャット` : "チャット";
+      $("title").textContent = heading;
+      document.title = heading;
+    }
+    function showStatus(message, retry) {
+      stopPolling();
+      show("status");
+      const el = $("status");
+      el.replaceChildren();
+      const p = document.createElement("p");
+      p.textContent = message;
+      el.appendChild(p);
+      if (retry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary";
+        button.textContent = "もう一度読み込む";
+        button.addEventListener("click", start);
+        el.appendChild(button);
+      }
+    }
+    function showNotFound(message) {
+      stopped = true;
+      clearTicket();
+      setTitle("");
+      showStatus(message || "このチャットは見つかりません。URL が止められたか、まちがっています。", false);
+    }
+    function showPasscode(errorText) {
+      stopPolling();
+      setTitle("");
+      show("passcode");
+      const err = $("passcode-error");
+      err.hidden = !errorText;
+      err.textContent = errorText || "";
+      $("passcode-input").focus();
+    }
+    function showName() {
+      stopPolling();
+      show("name");
+      $("name-help").textContent = title
+        ? `${title} さんに表示されます。あとから変えることもできます。`
+        : "チャットの相手に表示されます。";
+      $("name-input").value = guestName || "";
+      $("name-submit").textContent = guestName ? "変える" : "はじめる";
+      $("name-cancel").hidden = !guestName;
+      $("name-input").focus();
+    }
+    function showChat() {
+      show("chat");
+      $("me").textContent = guestName ? `あなたの名前: ${guestName}` : "";
+      $("rename").hidden = !guestName;
+      updateComposer();
+      render(true);
+      startPolling();
+    }
+
+    // ---------- 始める ----------
+    async function start() {
+      stopped = false;
+      if (!TOKEN_PATTERN.test(token)) {
+        showNotFound("URL がまちがっています。受け取った URL を最後までそのまま開いてください。");
+        return;
+      }
+      showStatus("読み込んでいます…", false);
+      await deriveTicketKey();
+      ticket = loadTicket();
+      try {
+        const opened = await call("open");
+        if (opened.needsPasscode) { clearTicket(); showPasscode(); return; }
+        setTitle(opened.title);
+        guestName = opened.guestName || null;
+        if (!guestName) { showName(); return; }
+        await refresh(true);
+        showChat();
+      } catch (error) {
+        if (handleCommonError(error)) return;
+        showStatus(error.message, true);
+      }
+    }
+
+    $("passcode-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = $("passcode-input");
+      const value = input.value.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).trim();
+      if (!/^[0-9]{6}$/.test(value)) { showPasscode("6桁の数字を入れてください。"); return; }
+      const submit = $("passcode-submit");
+      submit.disabled = true;
+      try {
+        const result = await call("unlock", { passcode: value });
+        saveTicket(result.ticket, result.expiresAt);
+        input.value = "";
+        await start();
+      } catch (error) {
+        if (error.status === 404) { showNotFound(error.message); return; }
+        if (error.status === 429 && error.body.retryAfter) {
+          const minutes = Math.max(1, Math.ceil(error.body.retryAfter / 60));
+          showPasscode(`${error.message}（あと${minutes}分ほど）`);
+        } else {
+          showPasscode(error.message);
+        }
+        input.select();
+      } finally {
+        submit.disabled = false;
+      }
+    });
+
+    $("rename").addEventListener("click", () => showName());
+    $("name-cancel").addEventListener("click", () => showChat());
+
+    $("name-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = $("name-input").value.trim();
+      const err = $("name-error");
+      if (!value || [...value].length > MAX_NAME) {
+        err.hidden = false;
+        err.textContent = `お名前は1〜${MAX_NAME}文字で入れてください。`;
+        return;
+      }
+      err.hidden = true;
+      const submit = $("name-submit");
+      submit.disabled = true;
+      try {
+        const result = await call("profile", { name: value });
+        guestName = result.guestName || value;
+        await refresh(true);
+        showChat();
+      } catch (error) {
+        if (error.status === 404 || (error.status === 401 && error.body.needsPasscode)) { handleCommonError(error); return; }
+        err.hidden = false;
+        err.textContent = error.message;
+      } finally {
+        submit.disabled = false;
+      }
+    });
+
+    // ---------- 読み込みと見回り ----------
+    // ▲ 差分の起点（listCursor）は **list が返した行だけ**から進める。手元の最後の行（自分が送った行を含む）から
+    //   取っていたころは、「相手が送る → こちらが送る → 見回り」の順で相手の1通が永久に落ち、しかもその行に
+    //   「既読」が付いた（markRead）。自分の行は次の list でも返ってくるので、id で畳めば二重にならない
+    let listCursor = null;
+    function advanceCursor(rows) {
+      for (const m of rows) {
+        const at = Date.parse(m.sentAt);
+        if (!Number.isNaN(at) && (listCursor === null || at > listCursor)) listCursor = at;
+      }
+    }
+    // full: 初めから読む（after なし）。見回りは after つきで差分だけ。
+    // 戻り値は「画面を描き直す必要があるか」と、新しく増えた行の数
+    async function refresh(full) {
+      const markRead = document.visibilityState === "visible";
+      // 同じ時刻の行（サーバーは sent_at > after で返す）と、ミリ秒より細かい時刻の切り捨てで落とさないよう 1ms 戻す。
+      // 重なって返ってきた行は id で畳む
+      const after = full || listCursor === null ? null : new Date(listCursor - 1).toISOString();
+      const result = await call("list", { ...(after ? { after } : {}), markRead });
+      const before = { title, guestName, lastReadByOwnerAt };
+      if (result.title) setTitle(result.title);
+      if (result.guestName) guestName = result.guestName;
+      lastReadByOwnerAt = result.lastReadByOwnerAt || null;
+      const incoming = Array.isArray(result.messages) ? result.messages : [];
+      let added = 0;
+      if (full) {
+        listCursor = null;
+        added = incoming.length;
+        messages = incoming.slice();
+      } else {
+        const known = new Set(messages.map((m) => m.id));
+        for (const m of incoming) if (!known.has(m.id)) { messages.push(m); added += 1; }
+      }
+      advanceCursor(incoming);
+      messages.sort((a, b) => Date.parse(a.sentAt) - Date.parse(b.sentAt));
+      const changed = full || added > 0 || before.lastReadByOwnerAt !== lastReadByOwnerAt
+        || before.title !== title || before.guestName !== guestName;
+      return { changed, added };
+    }
+    async function poll() {
+      if (polling || stopped || document.visibilityState !== "visible") return;
+      polling = true;
+      try {
+        const nearBottom = isNearBottom();
+        const { changed, added } = await refresh(false);
+        hideBanner();
+        // ▲ 何も変わっていなければ描き直さない。やり取りの欄は読み上げの対象（role=log）なので、
+        //   15秒ごとに中身を作り直すと、読み上げを使う人に会話全体が繰り返し読まれる
+        if (changed) render(nearBottom);
+        if (added && !nearBottom) $("newer").hidden = false;
+      } catch (error) {
+        if (!handleCommonError(error)) showBanner(error.message, true);
+      } finally {
+        polling = false;
+      }
+    }
+    function startPolling() {
+      stopPolling();
+      if (stopped) return;
+      pollTimer = setInterval(poll, POLL_MS);
+    }
+    function stopPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    // 画面が隠れているあいだは読みに行かない（読んでいないのに「既読」を付けないため）。戻ったらすぐ読む
+    document.addEventListener("visibilitychange", () => {
+      if ($("chat").hidden) return;
+      if (document.visibilityState === "visible") { poll(); startPolling(); } else { stopPolling(); }
+    });
+
+    function showBanner(message, retry) {
+      const el = $("banner");
+      el.replaceChildren(document.createTextNode(message));
+      if (retry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary";
+        button.textContent = "もう一度";
+        button.addEventListener("click", poll);
+        el.appendChild(button);
+      }
+      el.hidden = false;
+    }
+    function hideBanner() { $("banner").hidden = true; }
+
+    // ---------- 描く（中身はすべて textContent。相手が何を書いても HTML にしない） ----------
+    const dayFormatter = new Intl.DateTimeFormat("ja-JP", { timeZone: ZONE, year: "numeric", month: "long", day: "numeric", weekday: "short" });
+    const dayKeyFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: ZONE, year: "numeric", month: "2-digit", day: "2-digit" });
+    const timeFormatter = new Intl.DateTimeFormat("ja-JP", { timeZone: ZONE, hour: "2-digit", minute: "2-digit", hour12: false });
+
+    function isNearBottom() {
+      const log = $("log");
+      return log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    }
+    function scrollToBottom() {
+      const log = $("log");
+      log.scrollTop = log.scrollHeight;
+      $("newer").hidden = true;
+    }
+    $("newer").addEventListener("click", scrollToBottom);
+    $("log").addEventListener("scroll", () => { if (isNearBottom()) $("newer").hidden = true; });
+
+    function bubbleRow(kind, body, metaParts) {
+      const row = document.createElement("div");
+      row.className = `row ${kind}`;
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      const who = document.createElement("span");
+      who.className = "sr-only";
+      who.textContent = kind === "guest" ? "あなた: " : `${title || "相手"}: `;
+      bubble.appendChild(who);
+      bubble.appendChild(document.createTextNode(body));
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      for (const part of metaParts) {
+        if (part instanceof Node) meta.appendChild(part);
+        else { const line = document.createElement("div"); line.textContent = part; meta.appendChild(line); }
+      }
+      row.append(bubble, meta);
+      return row;
+    }
+
+    function render(stickToBottom) {
+      const log = $("log");
+      log.replaceChildren();
+      if (!messages.length && !pending.length) {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = title
+          ? `${title} さんとのやり取りがここに並びます。下の欄からメッセージを送れます。`
+          : "やり取りがここに並びます。";
+        log.appendChild(empty);
+        return;
+      }
+      const readUpTo = lastReadByOwnerAt ? Date.parse(lastReadByOwnerAt) : null;
+      let lastDay = null;
+      for (const m of messages) {
+        const at = new Date(m.sentAt);
+        const dayKey = dayKeyFormatter.format(at);
+        if (dayKey !== lastDay) {
+          lastDay = dayKey;
+          const pill = document.createElement("div");
+          pill.className = "day-pill";
+          pill.textContent = dayFormatter.format(at);
+          log.appendChild(pill);
+        }
+        const kind = m.from === "guest" ? "guest" : "owner";
+        const parts = [];
+        if (kind === "guest" && readUpTo !== null && at.getTime() <= readUpTo) parts.push("既読");
+        parts.push(timeFormatter.format(at));
+        log.appendChild(bubbleRow(kind, m.body, parts));
+      }
+      for (const p of pending) {
+        if (p.failed) {
+          const failed = document.createElement("div");
+          const label = document.createElement("span");
+          label.className = "failed";
+          label.textContent = p.error || "送れませんでした";
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.textContent = "もう一度送る";
+          retry.addEventListener("click", () => sendPending(p));
+          const discard = document.createElement("button");
+          discard.type = "button";
+          discard.textContent = "取り消す";
+          discard.style.marginLeft = "8px";
+          discard.addEventListener("click", () => { pending = pending.filter((x) => x !== p); render(false); });
+          failed.append(label, document.createElement("br"), retry, discard);
+          log.appendChild(bubbleRow("guest", p.body, [failed]));
+        } else {
+          log.appendChild(bubbleRow("guest", p.body, ["送信中…"]));
+        }
+      }
+      if (stickToBottom) scrollToBottom();
+    }
+
+    // ---------- 送る ----------
+    const textEl = $("text");
+    function updateComposer() {
+      // 打った分だけ欄を伸ばす（上限は画面の4割。CSS の max-height）
+      if (textEl.offsetParent !== null) {
+        textEl.style.height = "auto";
+        textEl.style.height = textEl.scrollHeight + 2 + "px";
+      }
+      const count = [...textEl.value].length;
+      const counter = $("counter");
+      counter.hidden = count < MAX_CHARS - 500;
+      counter.textContent = `${count} / ${MAX_CHARS}`;
+      counter.classList.toggle("over", count > MAX_CHARS);
+      $("send").disabled = !textEl.value.trim() || count > MAX_CHARS;
+    }
+    textEl.addEventListener("input", updateComposer);
+    // パソコンでは ⌘/Ctrl + Enter で送る（Enter だけは改行。日本語の変換の確定と取り違えない）
+    textEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+        event.preventDefault();
+        $("composer").requestSubmit();
+      }
+    });
+
+    $("composer").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const body = textEl.value.trim();
+      if (!body || [...body].length > MAX_CHARS) return;
+      const item = { clientMessageId: crypto.randomUUID(), body, failed: false };
+      pending.push(item);
+      textEl.value = "";
+      updateComposer();
+      render(true);
+      sendPending(item);
+    });
+
+    async function sendPending(item) {
+      item.failed = false;
+      render(true);
+      try {
+        // ▲ 送り直しも同じ clientMessageId。サーバーは同じものを2通にしない（届いていたのに返事だけ落ちたときの二重送信を防ぐ）
+        const result = await call("send", { text: item.body, clientMessageId: item.clientMessageId });
+        pending = pending.filter((x) => x !== item);
+        if (result.message && !messages.some((m) => m.id === result.message.id)) messages.push(result.message);
+        render(true);
+      } catch (error) {
+        if (error.status === 409 && error.body.needsName) {
+          // 名前を入れ直してもらう。打った本文は送れなかった行として残す
+          item.failed = true;
+          item.error = "先にお名前を入れてください";
+          showName();
+          return;
+        }
+        if (error.status === 404 || (error.status === 401 && error.body.needsPasscode)) {
+          pending = pending.filter((x) => x !== item);
+          textEl.value = item.body; // 打った本文を捨てない
+          handleCommonError(error);
+          return;
+        }
+        item.failed = true;
+        if (error.status === 429 && error.body.retryAfter) {
+          const minutes = Math.max(1, Math.ceil(error.body.retryAfter / 60));
+          item.error = `${error.message}（あと${minutes}分ほど）`;
+        } else {
+          item.error = error.message || "送れませんでした";
+        }
+        render(true);
+      }
+    }
+
+    updateComposer();
+    window.addEventListener("hashchange", () => location.reload());
+    start();
+  })();
+  </script>
+</body>
+</html>
