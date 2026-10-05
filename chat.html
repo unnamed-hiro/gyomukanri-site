@@ -9,7 +9,7 @@
   <!-- ▲ 読み書きする先は Web チャットの関数だけ（手元で確かめるときだけ localhost）。
        中身は textContent で入れているが、万一の差し込みでもよその宛先へ送れないように絞る -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src https://fikjpmotklstfvdvrrxp.supabase.co http://localhost:* http://127.0.0.1:*; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src https://fikjpmotklstfvdvrrxp.supabase.co http://localhost:* http://127.0.0.1:*; img-src 'self' data: blob: https://fikjpmotklstfvdvrrxp.supabase.co http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'none'">
   <title>チャット</title>
   <link rel="stylesheet" href="style.css">
   <style>
@@ -120,6 +120,46 @@
     .counter { font-size: 0.75rem; color: var(--muted); padding: 0 16px 4px; background: var(--bg); text-align: right; }
     .counter.over { color: var(--danger); }
 
+    /* 添付（画像・ファイル） */
+    .bubble.media { padding: 4px; background: transparent; }
+    .row .bubble.media { background: transparent; }
+    .attach-image {
+      display: block; padding: 0; border: none; background: var(--pill); cursor: zoom-in;
+      border-radius: 14px; overflow: hidden; max-width: 100%;
+    }
+    /* 取りに行く前は代わりの文字（alt）と壊れた絵の印を出さない（読み込み中の灰色の箱だけ見せる） */
+    .attach-image img:not([src]) { visibility: hidden; }
+    .attach-image img { display: block; max-width: min(240px, 60vw); max-height: 320px; min-width: 80px; min-height: 60px; object-fit: cover; }
+    .file-card {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px;
+      background: var(--bubble-owner); color: var(--bubble-text); max-width: min(78vw, 22em);
+    }
+    .row.guest .file-card { background: var(--bubble-guest); }
+    /* 印の地はやり取りの欄の地の色（吹き出しの色と重ならない。暗い外観では --pill が受けた吹き出しと同じ色） */
+    .file-card .icon { flex: none; width: 36px; height: 36px; border-radius: 8px; background: var(--chat-bg); color: var(--pill-text);
+      display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-weight: 700; }
+    .file-card .fname { font-weight: 600; overflow-wrap: anywhere; line-height: 1.4; }
+    .file-card .fsize { font-size: 0.8rem; color: var(--muted); }
+    .file-card button { margin-top: 4px; font: inherit; font-size: 0.85rem; color: var(--accent); background: none; border: none; padding: 4px 0;
+      min-height: 32px; cursor: pointer; text-decoration: underline; }
+    .lightbox {
+      position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.88);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 16px;
+      padding-top: max(16px, env(safe-area-inset-top));
+    }
+    .lightbox img { max-width: 100%; max-height: calc(100dvh - 120px); object-fit: contain; border-radius: 8px; }
+    .lightbox-bar { position: absolute; top: max(12px, env(safe-area-inset-top)); right: 12px; display: flex; gap: 8px; }
+    .lightbox-bar button {
+      font: inherit; color: #fff; background: rgba(255, 255, 255, 0.18); border: none; border-radius: 18px;
+      min-height: 44px; padding: 6px 16px; cursor: pointer;
+    }
+    form.composer .attach {
+      flex: none; width: 44px; min-height: 44px; padding: 0; border-radius: 22px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    form.composer .attach svg { width: 22px; height: 22px; }
+    #attach-error { margin: 0; padding: 4px 16px 0; background: var(--bg); }
+
     footer.chat-foot { padding: 6px 16px 10px; background: var(--bg); font-size: 0.75rem; color: var(--muted); line-height: 1.5; }
     footer.chat-foot a { color: var(--muted); }
   </style>
@@ -171,7 +211,15 @@
       <button type="button" id="newer" hidden>新しいメッセージ ↓</button>
     </div>
     <div id="counter" class="counter" hidden></div>
+    <p id="attach-error" class="error" role="alert" hidden></p>
     <form class="composer" id="composer" novalidate>
+      <button type="button" class="secondary attach" id="attach" aria-label="画像・ファイルを送る" title="画像・ファイルを送る">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+      <input type="file" id="file-input" multiple hidden
+             accept="image/*,.jpg,.jpeg,.png,.gif,.webp,.heic,.heif,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx">
       <label for="text" class="sr-only">メッセージ</label>
       <textarea id="text" rows="1" placeholder="メッセージを入力" enterkeyhint="enter"></textarea>
       <button type="submit" class="primary" id="send">送信</button>
@@ -195,6 +243,27 @@
     const POLL_MS = 15000;
     const MAX_CHARS = 5000;   // サーバー（checkSendText）と同じ。数えるのはコードポイント
     const MAX_NAME = 50;
+
+    // 添付（第2段）。▲ 許可リスト・上限・断りの文は**サーバー（_shared/webchat.ts）とアプリと同じ**。片方だけ直さないこと。
+    // 種類は拡張子から決める（ブラウザの file.type は OS で揺れる ―― CSV が application/vnd.ms-excel になる等）
+    const IMAGE_MAX = 10 * 1024 * 1024;
+    const FILE_MAX = 20 * 1024 * 1024;
+    const NAME_MAX = 200;              // コードポイント
+    const REENCODE_EDGE = 2560;        // 画像を描き直すときの長い辺
+    const REENCODE_QUALITY = 0.85;
+    const ALLOWED = {
+      jpg: ["image/jpeg", "image"], jpeg: ["image/jpeg", "image"], png: ["image/png", "image"],
+      gif: ["image/gif", "image"], webp: ["image/webp", "image"], heic: ["image/heic", "image"], heif: ["image/heif", "image"],
+      pdf: ["application/pdf", "file"], txt: ["text/plain", "file"], csv: ["text/csv", "file"], zip: ["application/zip", "file"],
+      doc: ["application/msword", "file"],
+      docx: ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "file"],
+      xls: ["application/vnd.ms-excel", "file"],
+      xlsx: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "file"],
+      ppt: ["application/vnd.ms-powerpoint", "file"],
+      pptx: ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "file"],
+    };
+    const TOO_LARGE = "画像は 10MB まで、ファイルは 20MB までです。";
+    const NOT_ALLOWED = "この種類のファイルは送れません（画像・PDF・Word・Excel・PowerPoint・テキスト・CSV・ZIP）。";
 
     const $ = (id) => document.getElementById(id);
     const sections = ["status", "passcode", "name", "chat"];
@@ -524,24 +593,31 @@
       const log = $("log");
       return log.scrollHeight - log.scrollTop - log.clientHeight < 80;
     }
+    // いちばん下を見ているか。画像は読み終わってから高さが決まるので、読み終わったときにこれが true なら下へ送り直す
+    let pinnedToBottom = true;
     function scrollToBottom() {
       const log = $("log");
       log.scrollTop = log.scrollHeight;
+      pinnedToBottom = true;
       $("newer").hidden = true;
     }
     $("newer").addEventListener("click", scrollToBottom);
-    $("log").addEventListener("scroll", () => { if (isNearBottom()) $("newer").hidden = true; });
+    $("log").addEventListener("scroll", () => {
+      pinnedToBottom = isNearBottom();
+      if (pinnedToBottom) $("newer").hidden = true;
+    });
 
+    // body は文字か、添付を描いた Node
     function bubbleRow(kind, body, metaParts) {
       const row = document.createElement("div");
       row.className = `row ${kind}`;
       const bubble = document.createElement("div");
-      bubble.className = "bubble";
+      bubble.className = body instanceof Node ? "bubble media" : "bubble";
       const who = document.createElement("span");
       who.className = "sr-only";
       who.textContent = kind === "guest" ? "あなた: " : `${title || "相手"}: `;
       bubble.appendChild(who);
-      bubble.appendChild(document.createTextNode(body));
+      bubble.appendChild(body instanceof Node ? body : document.createTextNode(body));
       const meta = document.createElement("div");
       meta.className = "meta";
       for (const part of metaParts) {
@@ -580,9 +656,10 @@
         const parts = [];
         if (kind === "guest" && readUpTo !== null && at.getTime() <= readUpTo) parts.push("既読");
         parts.push(timeFormatter.format(at));
-        log.appendChild(bubbleRow(kind, m.body, parts));
+        log.appendChild(bubbleRow(kind, attachmentNode(m) || m.body, parts));
       }
       for (const p of pending) {
+        const content = p.attachment ? pendingAttachmentNode(p) : p.body;
         if (p.failed) {
           const failed = document.createElement("div");
           const label = document.createElement("span");
@@ -596,11 +673,18 @@
           discard.type = "button";
           discard.textContent = "取り消す";
           discard.style.marginLeft = "8px";
-          discard.addEventListener("click", () => { pending = pending.filter((x) => x !== p); render(false); });
+          discard.addEventListener("click", () => {
+            pending = pending.filter((x) => x !== p);
+            if (p.previewURL) URL.revokeObjectURL(p.previewURL);
+            render(false);
+          });
           failed.append(label, document.createElement("br"), retry, discard);
-          log.appendChild(bubbleRow("guest", p.body, [failed]));
+          log.appendChild(bubbleRow("guest", content, [failed]));
         } else {
-          log.appendChild(bubbleRow("guest", p.body, ["送信中…"]));
+          const status = document.createElement("div");
+          status.textContent = p.attachment ? progressText(p) : "送信中…";
+          p.statusEl = status;
+          log.appendChild(bubbleRow("guest", content, [status]));
         }
       }
       if (stickToBottom) scrollToBottom();
@@ -635,6 +719,7 @@
       const body = textEl.value.trim();
       if (!body || [...body].length > MAX_CHARS) return;
       const item = { clientMessageId: crypto.randomUUID(), body, failed: false };
+      showAttachError(null); // 前に断ったファイルの話は、次に何か送った時点で消す
       pending.push(item);
       textEl.value = "";
       updateComposer();
@@ -642,38 +727,309 @@
       sendPending(item);
     });
 
+    // ---------- 添付（画像・ファイル） ----------
+    function formatSize(bytes) {
+      if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+      if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+      return `${bytes}B`;
+    }
+    function extensionOf(name) {
+      const i = name.lastIndexOf(".");
+      return i > 0 ? name.slice(i + 1).toLowerCase() : "";
+    }
+    // 名前は 200 コードポイントまで。拡張子を残して前を詰める
+    function fitName(name) {
+      const chars = [...name];
+      if (chars.length <= NAME_MAX) return name;
+      const ext = extensionOf(name);
+      const keep = NAME_MAX - (ext ? ext.length + 1 : 0);
+      return chars.slice(0, keep).join("") + (ext ? "." + ext : "");
+    }
+    // ▲ 読める画像は長い辺 2560px の JPEG に描き直す。写真の中の位置情報（撮った場所）などを落とし、大きさも減らすため。
+    //   GIF（動く）と、このブラウザが読めない画像（HEIC など）はそのまま送る
+    async function reencodeImage(file) {
+      try {
+        const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+        const scale = Math.min(1, REENCODE_EDGE / Math.max(bitmap.width, bitmap.height));
+        const w = Math.max(1, Math.round(bitmap.width * scale));
+        const h = Math.max(1, Math.round(bitmap.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff"; // 透明な PNG は白地に（JPEG は透明を持てない）
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(bitmap, 0, 0, w, h);
+        if (bitmap.close) bitmap.close();
+        return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", REENCODE_QUALITY));
+      } catch {
+        return null;
+      }
+    }
+    async function prepareAttachment(file) {
+      const entry = ALLOWED[extensionOf(file.name)];
+      if (!entry) throw new Error(NOT_ALLOWED);
+      let [mimeType, type] = entry;
+      let blob = file;
+      let name = fitName(file.name);
+      if (type === "image" && mimeType !== "image/gif") {
+        const redrawn = await reencodeImage(file);
+        if (redrawn) {
+          blob = redrawn;
+          mimeType = "image/jpeg";
+          name = fitName(name.replace(/\.[^.]+$/, "") + ".jpg");
+        }
+      }
+      if (blob.size === 0) throw new Error("空のファイルは送れません。");
+      if (blob.size > (type === "image" ? IMAGE_MAX : FILE_MAX)) throw new Error(TOO_LARGE);
+      return { blob, name, mimeType, type, size: blob.size };
+    }
+    function showAttachError(message) {
+      const el = $("attach-error");
+      el.textContent = message || "";
+      el.hidden = !message;
+    }
+    $("attach").addEventListener("click", () => { showAttachError(null); $("file-input").click(); });
+    $("file-input").addEventListener("change", async (event) => {
+      const files = [...event.target.files];
+      event.target.value = ""; // 同じファイルをもう一度選べるように
+      for (const file of files) {
+        let prepared;
+        try {
+          prepared = await prepareAttachment(file);
+        } catch (error) {
+          showAttachError(`${file.name}: ${error.message}`);
+          continue;
+        }
+        const item = {
+          clientMessageId: crypto.randomUUID(), attachment: true, failed: false,
+          ...prepared, body: prepared.type === "image" ? "[画像]" : `[ファイル] ${prepared.name}`,
+          previewURL: prepared.type === "image" ? URL.createObjectURL(prepared.blob) : null,
+          uploadId: null, uploaded: false, progress: 0,
+        };
+        pending.push(item);
+        render(true);
+        await sendPending(item); // 1つずつ順に送る（並べると順番が入れ替わる）
+      }
+    });
+
+    function progressText(p) {
+      return p.uploaded ? "送信中…" : `送信中… ${Math.round(p.progress * 100)}%`;
+    }
+    // 上げる。進み具合が分かるように XMLHttpRequest で（fetch には上げる側の進み具合が無い）
+    function putFile(url, item) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", url);
+        xhr.setRequestHeader("Content-Type", item.mimeType);
+        xhr.upload.onprogress = (e) => {
+          if (!e.lengthComputable) return;
+          item.progress = e.loaded / e.total;
+          if (item.statusEl) item.statusEl.textContent = progressText(item);
+        };
+        xhr.onload = () => (xhr.status >= 200 && xhr.status < 300)
+          ? resolve()
+          : reject(new ApiError(xhr.status, { error: "ファイルを上げられませんでした。もう一度お試しください。", uploadFailed: true }));
+        xhr.onerror = () => reject(new ApiError(0, { error: "つながりません。電波の状態を確かめて、もう一度お試しください。", uploadFailed: true }));
+        xhr.send(item.blob);
+      });
+    }
+
+    // 署名つきの URL（5分）。同じ行は期限まで使い回す（描き直すたびに取り直さない）
+    const fileURLs = new Map(); // messageId → { url, expiresAt }
+    async function fileURL(messageId) {
+      const cached = fileURLs.get(messageId);
+      if (cached && cached.expiresAt - Date.now() > 30000) return cached.url;
+      const result = await call("file", { messageId });
+      const expiresAt = Date.parse(result.expiresAt) || (Date.now() + 240000);
+      fileURLs.set(messageId, { url: result.url, expiresAt });
+      return result.url;
+    }
+    function fileCard(name, size, onOpen) {
+      const card = document.createElement("div");
+      card.className = "file-card";
+      const icon = document.createElement("div");
+      icon.className = "icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = (extensionOf(name) || "FILE").toUpperCase().slice(0, 4);
+      const info = document.createElement("div");
+      const fname = document.createElement("div");
+      fname.className = "fname";
+      fname.textContent = name;
+      const fsize = document.createElement("div");
+      fsize.className = "fsize";
+      fsize.textContent = formatSize(size || 0);
+      info.append(fname, fsize);
+      if (onOpen) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "ダウンロード";
+        button.addEventListener("click", onOpen);
+        info.appendChild(button);
+      }
+      card.append(icon, info);
+      return card;
+    }
+    // ▲ ダウンロードは**中身を受け取ってから**手元で保存させる。署名つき URL へページごと移ると、
+    //   Storage が失敗（期限切れなど）を返したときにチャットのページから離れてしまう。
+    //   新しいタブで開くのは、await のあとだとポップアップとして止められる
+    async function downloadAttachment(messageId, name) {
+      try {
+        const response = await fetch(await fileURL(messageId), { cache: "no-store", credentials: "omit" });
+        if (!response.ok) throw new ApiError(response.status, { error: "取り出せませんでした。もう一度お試しください。" });
+        const objectURL = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = objectURL;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectURL), 60000);
+      } catch (error) {
+        if (!(error instanceof ApiError) || !handleCommonError(error)) showBanner(error.message, false);
+      }
+    }
+
+    // ▲ 画像は**見えたときだけ**署名つき URL を取りに行く。全部いっぺんに取ると、画像の多い会話を開いた瞬間に
+    //   関数への要求と原寸の画像（無料プランでは縮小できない）が何十本も走る
+    const imageObserver = "IntersectionObserver" in window
+      ? new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            imageObserver.unobserve(entry.target);
+            const load = entry.target._load;
+            if (load) load();
+          }
+        }, { root: $("log"), rootMargin: "400px 0px" })
+      : null;
+
+    // 画像を大きく見る（ページの中に重ねる。新しいタブで開くと、URL の期限が切れていると開けない）
+    function showLightbox(src, name, messageId) {
+      const overlay = document.createElement("div");
+      overlay.className = "lightbox";
+      overlay.setAttribute("role", "dialog");
+      overlay.setAttribute("aria-label", `画像（${name}）`);
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = `画像（${name}）`;
+      const bar = document.createElement("div");
+      bar.className = "lightbox-bar";
+      const save = document.createElement("button");
+      save.type = "button";
+      save.textContent = "保存";
+      save.addEventListener("click", () => downloadAttachment(messageId, name));
+      const close = document.createElement("button");
+      close.type = "button";
+      close.textContent = "閉じる";
+      const dismiss = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+      const onKey = (event) => { if (event.key === "Escape") dismiss(); };
+      close.addEventListener("click", dismiss);
+      overlay.addEventListener("click", (event) => { if (event.target === overlay) dismiss(); });
+      document.addEventListener("keydown", onKey);
+      bar.append(save, close);
+      overlay.append(bar, img);
+      document.body.appendChild(overlay);
+      close.focus();
+    }
+
+    // サーバーから来た行の添付。知らない形なら null（置き換えの文字の吹き出しになる）
+    function attachmentNode(m) {
+      const a = m.attachment;
+      if (!a || (a.type !== "image" && a.type !== "file")) return null;
+      const name = typeof a.name === "string" && a.name ? a.name : (a.type === "image" ? "画像" : "ファイル");
+      const download = () => downloadAttachment(m.id, name);
+      if (a.type === "file") return fileCard(name, a.size, download);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "attach-image";
+      const img = document.createElement("img");
+      img.alt = `画像（${name}）`;
+      img.decoding = "async";
+      img.loading = "lazy";
+      button.appendChild(img);
+      // ブラウザが読めない画像（HEIC など）はファイルとして渡す
+      img.addEventListener("error", () => button.replaceWith(fileCard(name, a.size, download)), { once: true });
+      img.addEventListener("load", () => { if (pinnedToBottom) scrollToBottom(); }, { once: true });
+      button._load = () => fileURL(m.id)
+        .then((url) => { img.src = url; })
+        .catch(() => button.replaceWith(fileCard(name, a.size, download)));
+      if (imageObserver) imageObserver.observe(button); else button._load();
+      button.addEventListener("click", () => { if (img.currentSrc) showLightbox(img.currentSrc, name, m.id); });
+      return button;
+    }
+    function pendingAttachmentNode(p) {
+      if (p.type === "image" && p.previewURL) {
+        const wrap = document.createElement("div");
+        wrap.className = "attach-image";
+        const img = document.createElement("img");
+        img.alt = `送っている画像（${p.name}）`;
+        img.src = p.previewURL;
+        wrap.appendChild(img);
+        return wrap;
+      }
+      return fileCard(p.name, p.size, null);
+    }
+    function finishPending(item, result) {
+      pending = pending.filter((x) => x !== item);
+      if (item.previewURL) URL.revokeObjectURL(item.previewURL);
+      if (result.message && !messages.some((m) => m.id === result.message.id)) messages.push(result.message);
+      render(true);
+    }
+
     async function sendPending(item) {
       item.failed = false;
       render(true);
+      if (item.attachment) {
+        try {
+          // ▲ 上げ終わっていれば送るだけをやり直す。送り直しも同じ clientMessageId（サーバーが2通にしない）
+          if (!item.uploaded) {
+            const slot = await call("upload", {
+              name: item.name, mimeType: item.mimeType, size: item.size, clientMessageId: item.clientMessageId,
+            });
+            item.uploadId = slot.uploadId;
+            await putFile(slot.uploadUrl, item);
+            item.uploaded = true;
+            if (item.statusEl) item.statusEl.textContent = progressText(item);
+          }
+          finishPending(item, await call("send", { uploadId: item.uploadId, clientMessageId: item.clientMessageId }));
+        } catch (error) {
+          if (error.body && error.body.uploadFailed) item.uploaded = false; // 上げ直す（署名つきの URL は取り直す）
+          handleSendError(item, error);
+        }
+        return;
+      }
       try {
         // ▲ 送り直しも同じ clientMessageId。サーバーは同じものを2通にしない（届いていたのに返事だけ落ちたときの二重送信を防ぐ）
-        const result = await call("send", { text: item.body, clientMessageId: item.clientMessageId });
-        pending = pending.filter((x) => x !== item);
-        if (result.message && !messages.some((m) => m.id === result.message.id)) messages.push(result.message);
-        render(true);
+        finishPending(item, await call("send", { text: item.body, clientMessageId: item.clientMessageId }));
       } catch (error) {
-        if (error.status === 409 && error.body.needsName) {
-          // 名前を入れ直してもらう。打った本文は送れなかった行として残す
-          item.failed = true;
-          item.error = "先にお名前を入れてください";
-          showName();
-          return;
-        }
-        if (error.status === 404 || (error.status === 401 && error.body.needsPasscode)) {
-          pending = pending.filter((x) => x !== item);
-          textEl.value = item.body; // 打った本文を捨てない
-          handleCommonError(error);
-          return;
-        }
-        item.failed = true;
-        if (error.status === 429 && error.body.retryAfter) {
-          const minutes = Math.max(1, Math.ceil(error.body.retryAfter / 60));
-          item.error = `${error.message}（あと${minutes}分ほど）`;
-        } else {
-          item.error = error.message || "送れませんでした";
-        }
-        render(true);
+        handleSendError(item, error);
       }
+    }
+
+    // 送れなかったとき（文字も添付も同じ扱い）
+    function handleSendError(item, error) {
+      if (error.status === 409 && error.body.needsName) {
+        // 名前を入れ直してもらう。打った本文は送れなかった行として残す
+        item.failed = true;
+        item.error = "先にお名前を入れてください";
+        showName();
+        return;
+      }
+      if (error.status === 404 || (error.status === 401 && error.body.needsPasscode)) {
+        pending = pending.filter((x) => x !== item);
+        if (!item.attachment) textEl.value = item.body; // 打った本文を捨てない
+        else if (item.previewURL) URL.revokeObjectURL(item.previewURL);
+        handleCommonError(error);
+        return;
+      }
+      item.failed = true;
+      if (error.status === 429 && error.body.retryAfter) {
+        const minutes = Math.max(1, Math.ceil(error.body.retryAfter / 60));
+        item.error = `${error.message}（あと${minutes}分ほど）`;
+      } else {
+        item.error = error.message || "送れませんでした";
+      }
+      render(true);
     }
 
     updateComposer();
