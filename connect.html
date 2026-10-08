@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- 招待の URL（#以降）を受け取った人だけが見るページ。検索に載せない -->
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <!-- 外のサーバーには何も問い合わせない。アプリを開く以外のことはしない -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>業務管理アプリへの招待</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .card { margin: 24px 0; padding: 18px 16px; border: 1px solid var(--rule); border-radius: 12px; }
+    .card h2 { margin: 0 0 8px; padding-top: 0; border-top: none; font-size: 1.05rem; }
+    .open {
+      display: inline-block; margin-top: 8px; padding: 12px 20px; min-height: 44px;
+      color: #fff; background: var(--accent); border-radius: 10px; text-decoration: none; font-weight: 600;
+    }
+    .code {
+      margin: 8px 0 4px; font-size: 2rem; font-weight: 700; letter-spacing: 0.12em;
+      font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      overflow-wrap: anywhere;
+    }
+    .copy {
+      font: inherit; color: var(--accent); background: none; border: 1px solid var(--rule);
+      border-radius: 8px; padding: 6px 14px; cursor: pointer; min-height: 44px;
+    }
+    ol { padding-left: 1.4em; }
+    .steps li { margin: 4px 0; }
+    .warn { color: var(--muted); font-size: 0.9rem; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>業務管理アプリへの招待</h1>
+    <p class="muted">
+      業務管理（GyomuKanri）を使っている人から、アプリの中でやり取りするための招待が届きました。
+      このページは招待を受け取るためのもので、ここに何かを入力することはありません。
+    </p>
+
+    <div id="invalid" class="card" hidden>
+      <h2>招待が見つかりません</h2>
+      <p>URL が途中で切れているか、形が違います。招待した人に、もう一度 URL かコードを送ってもらってください。</p>
+    </div>
+
+    <div id="valid" hidden>
+      <div class="card">
+        <h2>アプリをお持ちの方</h2>
+        <p>下のボタンで業務管理アプリが開き、招待を受けるかどうかを確かめる画面になります。</p>
+        <a id="open" class="open" href="#">アプリで開く</a>
+        <p class="warn">ボタンでアプリが開かないときは、下のコードをアプリに入力してください。</p>
+      </div>
+
+      <div class="card">
+        <h2>コードで受け取る</h2>
+        <p>アプリの <strong>設定 → アプリの利用者とのつながり → コードを入力してつながる</strong> に、このコードを入れてください。</p>
+        <div id="code" class="code" aria-label="招待のコード"></div>
+        <button type="button" id="copy" class="copy">コードをコピー</button>
+        <span id="copied" class="muted" hidden>コピーしました</span>
+      </div>
+
+      <div class="card">
+        <h2>招待について</h2>
+        <ul>
+          <li>この招待は<strong>作られてから 24 時間</strong>で期限が切れ、<strong>1回だけ</strong>使えます。</li>
+          <li>受け取ると、招待した人のアプリに<strong>あなたが入力した名前</strong>が表示され、お互いのアプリの中でやり取りできるようになります（やり取りは業務管理のサーバーに保存されます。くわしくは<a href="privacy.html">プライバシーポリシー</a>）。</li>
+          <li>つながりはどちらからでも切れます。切っても、それまでのやり取りはお互いのアプリに残ります。</li>
+          <li>この URL とコードを知っている人は誰でも招待を受けられます。<strong>ほかの人に転送しないでください。</strong></li>
+        </ul>
+      </div>
+    </div>
+
+    <div id="noapp" class="card">
+      <h2>アプリをお持ちでない方</h2>
+      <p>業務管理は、いまのところ開発者の知り合いに直接お渡ししているアプリです（App Store では配っていません）。招待した人にお尋ねください。</p>
+    </div>
+
+    <nav><a href="index.html">トップ</a><a href="privacy.html">プライバシーポリシー</a></nav>
+  </main>
+  <script>
+    (function () {
+      // 招待の URL は `connect.html#t=<43文字の鍵>&c=<8文字のコード>`。
+      // どちらもフラグメントに置く（クエリだとサーバーのログや Referer に残る）。
+      // 鍵の形はアプリ側（AppConnectLinks）とサーバー（app-connect）と同じ。片方だけ直さないこと
+      var TOKEN = /^[A-Za-z0-9_-]{43}$/;
+      var CODE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/;
+      var SCHEME = "gyomukanri://connect#";
+
+      var params = {};
+      String(location.hash || "").replace(/^#/, "").split("&").forEach(function (part) {
+        var eq = part.indexOf("=");
+        if (eq <= 0) return;
+        params[decodeURIComponent(part.slice(0, eq))] = decodeURIComponent(part.slice(eq + 1));
+      });
+      var token = params.t || "";
+      var code = (params.c || "").toUpperCase().replace(/[-\s]/g, "");
+
+      var valid = document.getElementById("valid");
+      var invalid = document.getElementById("invalid");
+      if (!TOKEN.test(token) || !CODE.test(code)) {
+        invalid.hidden = false;
+        return;
+      }
+      valid.hidden = false;
+
+      // アプリに渡すのは鍵だけ（コードはアプリで打つ人のためのもの）
+      var open = document.getElementById("open");
+      open.setAttribute("href", SCHEME + encodeURIComponent(token));
+
+      // 表示は XXXX-XXXX（アプリの表示と同じ）。中身は textContent で入れる
+      var shown = code.slice(0, 4) + "-" + code.slice(4);
+      document.getElementById("code").textContent = shown;
+
+      var copy = document.getElementById("copy");
+      var copied = document.getElementById("copied");
+      copy.addEventListener("click", function () {
+        var done = function () { copied.hidden = false; setTimeout(function () { copied.hidden = true; }, 2000); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(shown).then(done, function () { window.prompt("コードをコピーしてください", shown); });
+        } else {
+          window.prompt("コードをコピーしてください", shown);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
